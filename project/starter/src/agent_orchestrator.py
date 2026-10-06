@@ -216,6 +216,40 @@ def _update_workflow_state(session_id: str, updates: dict,
 #  2.A - INVENTORY AGENT
 # ───────────────────────────────────────────────────────
 
+def _to_json_safe(item: dict) -> dict:
+    """
+    Convertit un item DynamoDB en dict sérialisable en JSON.
+
+    DynamoDB renvoie les nombres en Decimal (ex. total_orders), que json.dumps
+    ne sait pas sérialiser : on les convertit en chaîne via default=str.
+
+    Args:
+        item: Item DynamoDB brut (peut contenir des Decimal)
+
+    Returns:
+        Copie de l'item ne contenant que des types JSON natifs
+    """
+    return json.loads(json.dumps(item, default=str))
+
+
+def _days_since(date_str: str) -> Optional[int]:
+    """
+    Calcule le nombre de jours écoulés depuis une date AAAA-MM-JJ (UTC).
+
+    Args:
+        date_str: Date au format AAAA-MM-JJ (ex. order_date)
+
+    Returns:
+        Nombre de jours entiers écoulés, ou None si la date est absente/invalide
+    """
+    from datetime import datetime, timezone
+    try:
+        start = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return (datetime.now(timezone.utc) - start).days
+
+
 def build_inventory_agent() -> Agent:
     """
     Build the Inventory Agent.
@@ -224,13 +258,36 @@ def build_inventory_agent() -> Agent:
     only retrieves data for the OrchestratorAgent to share with downstream agents.
     """
 
-    # TODO: Create a BedrockModel using the WORKER model
-    pass
+    # Modèle worker (Sonnet 4.5) ; température basse : on veut des faits, pas de créativité
+    model = BedrockModel(
+        model_id=config.WORKER_MODEL_ID,
+        temperature=0.1,
+        region_name=config.AWS_REGION,
+    )
 
-    # TODO: System prompt for the Inventory Agent
-    pass
+    # Prompt système : collecteur de faits, jamais de décision d'éligibilité
+    system_prompt = """You are the InventoryAgent of NovaMart customer support.
+Your ONLY job is to gather accurate facts from NovaMart's order and customer databases.
 
-    # TODO: Implement check_order_status
+Tools:
+- check_order_status(customer_id, order_id): one order (status, product, dates, price, days_since_order)
+- get_customer_tier(customer_id): customer profile, including tier (Standard or Premium)
+- list_customer_orders(customer_id): every order of a customer
+
+Rules:
+1. Always use the tools; never guess or invent data.
+2. For a request about a specific order, call check_order_status AND get_customer_tier,
+   so downstream agents have both the order facts and the customer tier.
+3. If no order ID is given, call list_customer_orders.
+4. For account questions ("what is my tier?", "am I premium?"), call get_customer_tier.
+5. Report facts only. NEVER decide or state whether a return or refund is eligible,
+   approved or denied - that is the RefundAgent's job.
+6. If a record is not found, say so explicitly.
+
+Answer with a concise, structured fact sheet: customer (id, name, tier), then each order
+(order_id, product, category, status, order_date, estimated_delivery, days_since_order,
+price, quantity)."""
+
     # NOTE: the Orders table has a COMPOSITE key (customer_id = partition key,
     # order_id = sort key), so a get_item needs BOTH values. That is why this
     # tool takes customer_id as well as order_id.
@@ -246,11 +303,29 @@ def build_inventory_agent() -> Agent:
 
         Returns:
             Order record (order_id, status, product_name, order_date, price, ...)
-            or a not-found message
+            plus days_since_order, or a not-found message
         """
-        pass
+        table = dynamodb.Table(config.ORDERS_TABLE)
+        try:
+            # get_item exige la clé complète : customer_id + order_id
+            response = table.get_item(Key={'customer_id': customer_id, 'order_id': order_id})
+        except ClientError as exc:
+            return {'found': False, 'error': f"DynamoDB error: {exc.response['Error']['Message']}"}
 
-    # TODO: Implement get_customer_tier
+        item = response.get('Item')
+        if not item:
+            return {
+                'found': False,
+                'customer_id': customer_id,
+                'order_id': order_id,
+                'message': f"No order {order_id} found for customer {customer_id}.",
+            }
+        order = _to_json_safe(item)
+        # Fait calculé (pas une décision) : âge de la commande en jours
+        order['days_since_order'] = _days_since(order.get('order_date'))
+        order['found'] = True
+        return order
+
     @tool
     def get_customer_tier(customer_id: str) -> dict:
         """
@@ -261,11 +336,25 @@ def build_inventory_agent() -> Agent:
             customer_id: The customer's unique identifier
 
         Returns:
-            Customer profile including tier and account details
+            Customer profile including tier and account details, or a not-found message
         """
-        pass
+        table = dynamodb.Table(config.CUSTOMERS_TABLE)
+        try:
+            response = table.get_item(Key={'customer_id': customer_id})
+        except ClientError as exc:
+            return {'found': False, 'error': f"DynamoDB error: {exc.response['Error']['Message']}"}
 
-    # TODO: Implement list_customer_orders
+        item = response.get('Item')
+        if not item:
+            return {
+                'found': False,
+                'customer_id': customer_id,
+                'message': f"No customer {customer_id} found.",
+            }
+        customer = _to_json_safe(item)
+        customer['found'] = True
+        return customer
+
     @tool
     def list_customer_orders(customer_id: str) -> dict:
         """
@@ -275,12 +364,30 @@ def build_inventory_agent() -> Agent:
             customer_id: The customer's unique identifier
 
         Returns:
-            List of all orders with order_id, status, order_date, and amount
+            Dict with customer_id, order_count and the list of orders (order_id,
+            product_name, status, order_date, days_since_order, price, quantity)
         """
-        pass
+        table = dynamodb.Table(config.ORDERS_TABLE)
+        try:
+            # Query sur la clé de partition : toutes les commandes du client
+            response = table.query(KeyConditionExpression=Key('customer_id').eq(customer_id))
+        except ClientError as exc:
+            return {'customer_id': customer_id, 'error': f"DynamoDB error: {exc.response['Error']['Message']}"}
 
-    # TODO: Instantiate and return the Agent
-    pass
+        orders = []
+        for item in response.get('Items', []):
+            order = _to_json_safe(item)
+            order['days_since_order'] = _days_since(order.get('order_date'))
+            orders.append(order)
+        orders.sort(key=lambda o: o.get('order_date', ''), reverse=True)
+        return {'customer_id': customer_id, 'order_count': len(orders), 'orders': orders}
+
+    return Agent(
+        name='InventoryAgent',
+        model=model,
+        system_prompt=system_prompt,
+        tools=[check_order_status, get_customer_tier, list_customer_orders],
+    )
 
 
 # ───────────────────────────────────────────────────────

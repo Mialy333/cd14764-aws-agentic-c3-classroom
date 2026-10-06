@@ -9,6 +9,7 @@ records how each one is handled, and attributes guardrail blocks to the policy t
 
 Usage (from project/starter, venv active, AWS credentials exported):
     python scripts/adversarial_test.py 2>&1 | tee evidence/logs/adversarial-test.txt
+    python scripts/adversarial_test.py evidence/standout/other_report.md   # custom report path
 """
 import os
 import sys
@@ -24,7 +25,8 @@ import config                      # noqa: E402
 import agent_orchestrator as ao    # noqa: E402
 
 RUNTIME = boto3.client('bedrock-runtime', region_name=config.AWS_REGION)
-OUTPUT_MD = os.path.join(ROOT, 'evidence', 'standout', 'guardrail_adversarial.md')
+OUTPUT_MD = (os.path.abspath(sys.argv[1]) if len(sys.argv) > 1
+             else os.path.join(ROOT, 'evidence', 'standout', 'guardrail_adversarial.md'))
 
 # (category, customer_id, request, expected handling)
 CASES = [

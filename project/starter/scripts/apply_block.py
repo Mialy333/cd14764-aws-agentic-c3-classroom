@@ -13,17 +13,19 @@ or
     #  TASK 4 - MEMORY
     # ═══════════════════════════════════════════════════════
 Recognized titles start with "#  2." or "#  TASK ". In the target file, a section runs
-from its banner up to the next banner (a line starting with "# ─" or "# ═" in column 0),
-excluded. A backup src/agent_orchestrator.py.bak is written first, then the file is
+from its banner up to the next full banner (a "# ───" / "# ═══" separator line followed
+by a "#  TITLE" line), excluded. A backup src/agent_orchestrator.py.bak is written first, then the file is
 compiled to catch any syntax error.
 """
 import pathlib
+import re
 import py_compile
 import shutil
 import sys
 
 TARGET = pathlib.Path('src/agent_orchestrator.py')
 TITLE_PREFIXES = ('#  2.', '#  TASK ')
+BANNER = re.compile(r'\n# [─═]{10,}\n#  \S')
 
 
 def _split_sections(block: str) -> list:
@@ -64,10 +66,13 @@ def _replace_section(src: str, title: str, new_text: str) -> tuple:
     pos = src.index(title)
     start = src.rfind('\n', 0, src.rfind('\n', 0, pos)) + 1
     after_banner = src.index('\n', src.index('\n', pos) + 1) + 1
-    ends = [i for i in (src.find('\n# ─', after_banner), src.find('\n# ═', after_banner)) if i != -1]
-    if not ends:
+    # The section ends at the next full banner: a separator line (10+ box-drawing
+    # characters) immediately followed by a "#  TITLE" line. Short "# --- note ---"
+    # comments inside a section are not banners.
+    match = BANNER.search(src, after_banner)
+    if not match:
         sys.exit(f"No banner found after '{title}'.")
-    end = min(ends) + 1
+    end = match.start() + 1
     return src[:start] + new_text + '\n\n\n' + src[end:], end - start
 
 

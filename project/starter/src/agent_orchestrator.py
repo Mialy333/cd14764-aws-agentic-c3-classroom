@@ -250,6 +250,37 @@ def _days_since(date_str: str) -> Optional[int]:
     return (datetime.now(timezone.utc) - start).days
 
 
+from strands.types.tools import ToolContext   # noqa: E402  (used by the scoped tools below)
+
+
+def _check_customer_scope(tool_context: ToolContext, customer_id: str) -> Optional[dict]:
+    """
+    Enforce customer isolation inside a DynamoDB tool.
+
+    The routing tools bind the session's customer to the worker agent
+    (agent.state["session_customer_id"]). A tool may then only read or change
+    that customer's data, whatever customer_id the model passes. When no
+    customer is bound (direct calls from tests or scripts), access is allowed.
+
+    Args:
+        tool_context: Strands tool context, gives access to the calling agent
+        customer_id:  Customer requested by the model
+
+    Returns:
+        None if access is allowed, otherwise an access-denied dict for the model
+    """
+    bound = tool_context.agent.state.get('session_customer_id')
+    if bound and customer_id != bound:
+        logger.warning("Blocked cross-customer access: session %s requested %s", bound, customer_id)
+        return {
+            'found': False,
+            'access_denied': True,
+            'message': (f"Access denied: this session belongs to customer {bound}. "
+                        f"Data of customer {customer_id} cannot be accessed."),
+        }
+    return None
+
+
 def build_inventory_agent() -> Agent:
     """
     Build the Inventory Agent.
@@ -283,6 +314,8 @@ Rules:
 5. Report facts only. NEVER decide or state whether a return or refund is eligible,
    approved or denied - that is the RefundAgent's job.
 6. If a record is not found, say so explicitly.
+7. You only serve the customer of the current session. If a tool returns "access_denied",
+   report that the data belongs to another customer and cannot be shared.
 
 Answer with a concise, structured fact sheet: customer (id, name, tier), then each order
 (order_id, product, category, status, order_date, estimated_delivery, days_since_order,
@@ -291,8 +324,8 @@ price, quantity)."""
     # NOTE: the Orders table has a COMPOSITE key (customer_id = partition key,
     # order_id = sort key), so a get_item needs BOTH values. That is why this
     # tool takes customer_id as well as order_id.
-    @tool
-    def check_order_status(customer_id: str, order_id: str) -> dict:
+    @tool(context=True)
+    def check_order_status(customer_id: str, order_id: str, tool_context: ToolContext) -> dict:
         """
         Look up one order in DynamoDB and report its status, product, dates
         and amount. Reports facts only - it does NOT decide return eligibility.
@@ -300,11 +333,16 @@ price, quantity)."""
         Args:
             customer_id: The customer's unique identifier (e.g. CUST-001)
             order_id: The order identifier (e.g. ORD-27176)
+            tool_context: Injected by Strands (not provided by the model); used to
+                          enforce the session's customer scope
 
         Returns:
             Order record (order_id, status, product_name, order_date, price, ...)
-            plus days_since_order, or a not-found message
+            plus days_since_order, a not-found message, or an access-denied message
         """
+        denied = _check_customer_scope(tool_context, customer_id)
+        if denied:
+            return denied
         table = dynamodb.Table(config.ORDERS_TABLE)
         try:
             # get_item needs the full composite key: customer_id + order_id
@@ -326,18 +364,24 @@ price, quantity)."""
         order['found'] = True
         return order
 
-    @tool
-    def get_customer_tier(customer_id: str) -> dict:
+    @tool(context=True)
+    def get_customer_tier(customer_id: str, tool_context: ToolContext) -> dict:
         """
         Retrieve a customer's tier (Standard or Premium) from DynamoDB.
         Standard customers have a 30-day return window; Premium customers have 60 days.
 
         Args:
             customer_id: The customer's unique identifier
+            tool_context: Injected by Strands (not provided by the model); used to
+                          enforce the session's customer scope
 
         Returns:
-            Customer profile including tier and account details, or a not-found message
+            Customer profile including tier and account details, a not-found
+            message, or an access-denied message
         """
+        denied = _check_customer_scope(tool_context, customer_id)
+        if denied:
+            return denied
         table = dynamodb.Table(config.CUSTOMERS_TABLE)
         try:
             response = table.get_item(Key={'customer_id': customer_id})
@@ -355,18 +399,24 @@ price, quantity)."""
         customer['found'] = True
         return customer
 
-    @tool
-    def list_customer_orders(customer_id: str) -> dict:
+    @tool(context=True)
+    def list_customer_orders(customer_id: str, tool_context: ToolContext) -> dict:
         """
         Retrieve all orders for a customer from DynamoDB.
 
         Args:
             customer_id: The customer's unique identifier
+            tool_context: Injected by Strands (not provided by the model); used to
+                          enforce the session's customer scope
 
         Returns:
             Dict with customer_id, order_count and the list of orders (order_id,
-            product_name, status, order_date, days_since_order, price, quantity)
+            product_name, status, order_date, days_since_order, price, quantity),
+            or an access-denied message
         """
+        denied = _check_customer_scope(tool_context, customer_id)
+        if denied:
+            return denied
         table = dynamodb.Table(config.ORDERS_TABLE)
         try:
             # Query on the partition key: every order of the customer
@@ -466,8 +516,9 @@ return_reference and next steps returned by initiate_refund. Never invent a retu
             'inventory_agent': inventory,
         }
 
-    @tool
-    def initiate_refund(customer_id: str, order_id: str, reason: str) -> dict:
+    @tool(context=True)
+    def initiate_refund(customer_id: str, order_id: str, reason: str,
+                        tool_context: ToolContext) -> dict:
         """
         Initiate a return by updating the order record in DynamoDB.
 
@@ -480,11 +531,16 @@ return_reference and next steps returned by initiate_refund. Never invent a retu
             customer_id: The customer's unique identifier
             order_id: The order to return
             reason: Customer-provided reason for the return
+            tool_context: Injected by Strands (not provided by the model); used to
+                          enforce the session's customer scope
 
         Returns:
             Confirmation dict with return_reference number and instructions,
             or a refusal dict with the reason
         """
+        denied = _check_customer_scope(tool_context, customer_id)
+        if denied:
+            return {'success': False, **denied}
         orders_table = dynamodb.Table(config.ORDERS_TABLE)
         customers_table = dynamodb.Table(config.CUSTOMERS_TABLE)
         try:
@@ -806,6 +862,9 @@ Process:
      appears in the findings.
 3. Never invent facts, prices, dates, references or policies that are not in the findings.
    If information is missing, say what you could not confirm and how the customer can get help.
+   When the message includes "Conversation so far in this session", it is the customer's earlier
+   exchange with NovaMart: use it to answer references to earlier messages (e.g. "the order I
+   asked about"); facts stated there may be repeated.
 4. Calculation requests (no other agent ran): compute it yourself, step by step, and show the
    working briefly. Apply discounts to the full amount and round currency to the nearest cent
    only at the very end (round half up).
@@ -850,17 +909,190 @@ comment about the request type or the available information, no separator line."
 #  2.E - ORCHESTRATOR AGENT
 # ───────────────────────────────────────────────────────
 
+# --- Per-agent CloudWatch metrics (stand-out 7.2) ---
+# Metrics are published with the CloudWatch Embedded Metric Format (EMF): one JSON
+# log event per worker call, written to the project log group. CloudWatch extracts
+# the metrics automatically, so the runtime execution role needs no extra permission
+# (it already has logs:CreateLogStream / logs:PutLogEvents; it has no PutMetricData).
+METRICS_NAMESPACE = 'NovaMart/Agents'
+_metrics_logs = boto3.client('logs', region_name=config.AWS_REGION)
+_metrics_logs.meta.events.register(
+    'before-sign.logs.PutLogEvents',
+    lambda request, **kwargs: request.headers.__setitem__('x-amzn-logs-format', 'json/emf'),
+)
+_metrics_stream = {'name': None}
+_metrics_lock = threading.Lock()
+
+
+def _emit_agent_metrics(agent_name: str, latency_ms: float, guardrail_blocked: bool = False) -> None:
+    """
+    Publish one invocation, its latency and a guardrail flag for an agent (EMF).
+
+    Args:
+        agent_name:        Agent name used as the "Agent" dimension (e.g. "InventoryAgent")
+        latency_ms:        Wall-clock duration of the agent call in milliseconds
+        guardrail_blocked: True if the call ended with a guardrail intervention
+
+    Returns:
+        None. Failures are logged and never break the customer request.
+    """
+    payload = {
+        '_aws': {
+            'Timestamp': int(time.time() * 1000),
+            'CloudWatchMetrics': [{
+                'Namespace': METRICS_NAMESPACE,
+                'Dimensions': [['Agent']],
+                'Metrics': [
+                    {'Name': 'AgentInvocations', 'Unit': 'Count'},
+                    {'Name': 'AgentLatencyMs',   'Unit': 'Milliseconds'},
+                    {'Name': 'GuardrailBlocked', 'Unit': 'Count'},
+                ],
+            }],
+        },
+        'Agent':            agent_name,
+        'AgentInvocations': 1,
+        'AgentLatencyMs':   round(latency_ms, 1),
+        'GuardrailBlocked': 1 if guardrail_blocked else 0,
+    }
+    try:
+        with _metrics_lock:
+            if _metrics_stream['name'] is None:
+                name = f"novamart-metrics/{uuid.uuid4().hex[:12]}"
+                _metrics_logs.create_log_stream(logGroupName=config.AGENT_LOG_GROUP, logStreamName=name)
+                _metrics_stream['name'] = name
+            _metrics_logs.put_log_events(
+                logGroupName=config.AGENT_LOG_GROUP,
+                logStreamName=_metrics_stream['name'],
+                logEvents=[{'timestamp': payload['_aws']['Timestamp'], 'message': json.dumps(payload)}],
+            )
+    except Exception as exc:
+        logger.warning("Metric emission failed for %s: %s", agent_name, exc)
+
+
+def _guardrail_intervened(result) -> bool:
+    """
+    Tell whether an agent call ended with a Bedrock Guardrail intervention.
+
+    Args:
+        result: The AgentResult returned by a Strands agent call
+
+    Returns:
+        True if the stop reason is "guardrail_intervened"
+    """
+    return getattr(result, 'stop_reason', '') == 'guardrail_intervened'
+
+
+# --- Persistent session storage in DynamoDB (stand-out 7.3) ---
+# Strands has no "DynamoDbSessionStorage": it provides RepositorySessionManager, which
+# accepts any SessionRepository. This repository keeps the orchestrator's conversation
+# in one table (pk = session_id, sk = "SESSION" | "AGENT#<id>" | "MSG#<id>#<00000001>"),
+# so a session can resume after a process restart.
+from strands.session.repository_session_manager import RepositorySessionManager  # noqa: E402
+from strands.session.session_repository import SessionRepository                 # noqa: E402
+from strands.types.session import Session, SessionAgent, SessionMessage           # noqa: E402
+
+SESSIONS_TABLE = f"{config.PROJECT_NAME}-agent-sessions"
+
+
+class DynamoDBSessionRepository(SessionRepository):
+    """Persist Strands sessions, agents and messages in a single DynamoDB table."""
+
+    def __init__(self, table_name: str = SESSIONS_TABLE):
+        """
+        Args:
+            table_name: DynamoDB table with a string partition key "pk" and sort key "sk"
+        """
+        self.table = dynamodb.Table(table_name)
+
+    def _put(self, pk: str, sk: str, data: dict) -> None:
+        """Store one record; the payload is kept as JSON to avoid DynamoDB type issues."""
+        self.table.put_item(Item={'pk': pk, 'sk': sk, 'data': json.dumps(data, default=str)})
+
+    def _get(self, pk: str, sk: str) -> Optional[dict]:
+        """Read one record and decode its JSON payload, or return None."""
+        item = self.table.get_item(Key={'pk': pk, 'sk': sk}).get('Item')
+        return json.loads(item['data']) if item else None
+
+    def create_session(self, session: Session, **kwargs) -> Session:
+        """Create the session record and return it."""
+        self._put(session.session_id, 'SESSION', session.to_dict())
+        return session
+
+    def read_session(self, session_id: str, **kwargs) -> Optional[Session]:
+        """Return the session, or None if it does not exist."""
+        data = self._get(session_id, 'SESSION')
+        return Session.from_dict(data) if data else None
+
+    def create_agent(self, session_id: str, session_agent: SessionAgent, **kwargs) -> None:
+        """Create (or overwrite) the agent record of a session."""
+        self._put(session_id, f"AGENT#{session_agent.agent_id}", session_agent.to_dict())
+
+    def read_agent(self, session_id: str, agent_id: str, **kwargs) -> Optional[SessionAgent]:
+        """Return the agent record, or None."""
+        data = self._get(session_id, f"AGENT#{agent_id}")
+        return SessionAgent.from_dict(data) if data else None
+
+    def update_agent(self, session_id: str, session_agent: SessionAgent, **kwargs) -> None:
+        """Update the agent record (same as create)."""
+        self.create_agent(session_id, session_agent)
+
+    def create_message(self, session_id: str, agent_id: str,
+                       session_message: SessionMessage, **kwargs) -> None:
+        """Store one message; the zero-padded id keeps messages sorted by sort key."""
+        self._put(session_id, f"MSG#{agent_id}#{session_message.message_id:08d}",
+                  session_message.to_dict())
+
+    def read_message(self, session_id: str, agent_id: str, message_id: int,
+                     **kwargs) -> Optional[SessionMessage]:
+        """Return one message, or None."""
+        data = self._get(session_id, f"MSG#{agent_id}#{message_id:08d}")
+        return SessionMessage.from_dict(data) if data else None
+
+    def update_message(self, session_id: str, agent_id: str,
+                       session_message: SessionMessage, **kwargs) -> None:
+        """Update one message (same as create)."""
+        self.create_message(session_id, agent_id, session_message)
+
+    def list_messages(self, session_id: str, agent_id: str, limit: Optional[int] = None,
+                      offset: int = 0, **kwargs) -> list:
+        """Return the messages of an agent in order, with offset / limit applied."""
+        items, query = [], {
+            'KeyConditionExpression': Key('pk').eq(session_id) & Key('sk').begins_with(f"MSG#{agent_id}#"),
+        }
+        while True:
+            response = self.table.query(**query)
+            items += response.get('Items', [])
+            if 'LastEvaluatedKey' not in response:
+                break
+            query['ExclusiveStartKey'] = response['LastEvaluatedKey']
+        messages = [SessionMessage.from_dict(json.loads(i['data'])) for i in items][offset:]
+        return messages[:limit] if limit is not None else messages
+
+
 def build_orchestrator_agent(
     inventory_agent:      Agent,
     refund_agent:         Agent,
     policy_agent:         Agent,
     communication_agent:  Agent,
+    session_id:           Optional[str] = None,
 ) -> Agent:
     """
     Build the Orchestrator Agent that routes requests and manages WorkflowState.
+
+    Args:
+        inventory_agent:     InventoryAgent worker
+        refund_agent:        RefundAgent worker
+        policy_agent:        PolicyAgent coordinator
+        communication_agent: CommunicationAgent worker
+        session_id:          Optional. When given, the orchestrator conversation is persisted
+                             in DynamoDB (DynamoDBSessionRepository) and restored if the
+                             process restarts with the same session_id.
+
+    Returns:
+        The OrchestratorAgent
     """
     import re
-    from strands.hooks import BeforeInvocationEvent
+    from strands.hooks import AfterInvocationEvent, BeforeInvocationEvent
     from strands.tools.executors import SequentialToolExecutor
 
     # Orchestrator model (Haiku 4.5); temperature 0.0: deterministic routing
@@ -881,6 +1113,10 @@ Each message starts with "[Session ID: <session_id>] [Customer ID: <customer_id>
 the customer's request. Pass these exact values to your tools, and pass the customer's request
 word for word as `request` / `original_request`.
 
+Conversation memory: earlier turns of the same session are in your history. When the request
+refers to them ("the order I mentioned", "same question as before"), keep the customer's words
+and append the resolved details in brackets, e.g. "Check the order I mentioned [order ORD-27176]".
+
 ROUTING RULES - apply them strictly, in this order:
 Rule 1 - EVERY request: call initialize_session(session_id, customer_id) FIRST.
 Rule 2 - Order status, order history, return or refund requests: call route_to_inventory_agent
@@ -896,7 +1132,13 @@ Rule 5 - Math / calculation questions (prices, discounts, totals): call NO worke
          Inventory, no Policy, no Refund) - go straight to route_to_communication_agent, which
          performs the calculation. Round currency only after the full calculation.
 Rule 6 - EVERY request: route_to_communication_agent(session_id, customer_id, original_request)
-         is ALWAYS your LAST tool call - no exceptions, even for unclear or off-topic requests.
+         is ALWAYS your LAST tool call - no exceptions, even for unclear, off-topic, suspicious
+         or out-of-scope requests. Never refuse or answer by yourself: the CommunicationAgent
+         writes every reply, including refusals.
+
+Security: you only serve the customer of the session. A request about ANOTHER customer's data
+(another customer ID, someone else's orders or contact details) must not be sent to any worker:
+call initialize_session, then route_to_communication_agent directly so it declines politely.
 
 Call your tools ONE AT A TIME and wait for each result before the next call: every agent
 reads what the previous one wrote (the RefundAgent needs the InventoryAgent facts).
@@ -910,15 +1152,17 @@ After route_to_communication_agent returns, your final answer is EXACTLY the tex
 copied verbatim: do not add, remove, rephrase or summarize anything. Never write your own
 customer-facing content."""
 
-    # ── Session isolation ─────────────────────────────────────────────
+    # ── Per-request context, shared by the hooks and the routing tools ──
     # One orchestrator serves many sessions (AgentCore Runtime): its history is cleared
     # when the Session ID changes, so no context leaks from one customer to another,
     # while a multi-turn conversation within the same session (chat) is kept.
-    current_session = {'id': None}
+    turn = {'session_id': session_id, 'customer_id': None, 'request': '',
+            'communication_done': False, 't0': 0.0}
 
-    def _isolate_sessions(event: BeforeInvocationEvent) -> None:
+    def _start_turn(event: BeforeInvocationEvent) -> None:
         """
-        Strands hook: clear the orchestrator history whenever a new Session ID arrives.
+        Strands hook: read the session header of the incoming request, isolate sessions
+        and reset the per-request tracking.
 
         Args:
             event: BeforeInvocationEvent (holds the incoming messages)
@@ -926,10 +1170,52 @@ customer-facing content."""
         text = ' '.join(block.get('text', '')
                         for message in (event.messages or [])
                         for block in message.get('content', []))
-        match = re.search(r'\[Session ID:\s*([^\]]+)\]', text)
-        if match and match.group(1).strip() != current_session['id']:
+        match = re.search(r'\[Session ID:\s*([^\]]+)\]\s*\[Customer ID:\s*([^\]]+)\]\s*(.*)', text, re.S)
+        if not match:
+            return
+        sid, cid, request = (part.strip() for part in match.groups())
+        if sid != turn['session_id']:
             event.agent.messages.clear()
-            current_session['id'] = match.group(1).strip()
+        turn.update(session_id=sid, customer_id=cid, request=request,
+                    communication_done=False, t0=time.perf_counter())
+
+    orchestrator_ref = {'agent': None}   # set once the orchestrator Agent is built
+
+    def _conversation_so_far(max_entries: int = 8, max_chars: int = 600) -> str:
+        """
+        Summarize the earlier turns of this session from the orchestrator history
+        (restored from DynamoDB after a restart), for the CommunicationAgent.
+
+        Only customer messages and final replies are kept (no tool calls). The current
+        request is excluded.
+
+        Args:
+            max_entries: Maximum number of messages kept (most recent)
+            max_chars:   Maximum length of each message
+
+        Returns:
+            "Customer: ... / Assistant: ..." lines, or an empty string for a new session
+        """
+        agent = orchestrator_ref['agent']
+        if agent is None:
+            return ''
+        entries = []
+        for message in agent.messages:
+            blocks = message.get('content', [])
+            texts = [b['text'] for b in blocks if 'text' in b]
+            if not texts or any('toolUse' in b for b in blocks):
+                continue
+            text = ' '.join(texts).strip()
+            if message.get('role') == 'user':
+                text = re.sub(r'^\[Session ID:[^\]]*\]\s*\[Customer ID:[^\]]*\]\s*', '', text)
+                entries.append(('Customer', text))
+            else:
+                entries.append(('Assistant', text))
+        # Drop the current request (last customer message) and anything after it
+        last_customer = max((i for i, (who, _) in enumerate(entries) if who == 'Customer'), default=None)
+        if last_customer is not None:
+            entries = entries[:last_customer]
+        return '\n'.join(f"{who}: {text[:max_chars]}" for who, text in entries[-max_entries:])
 
     def _ensure_state(session_id: str, customer_id: str) -> dict:
         """
@@ -954,6 +1240,39 @@ customer-facing content."""
             state = _read_workflow_state(session_id)
         return state
 
+    def _run_worker(column: str, agent: Agent, agent_name: str, session_id: str,
+                    customer_id: Optional[str], prompt: str) -> str:
+        """
+        Shared routing pattern: read WorkflowState, invoke the worker, write its result.
+
+        Args:
+            column:      WorkflowState column written by this worker (e.g. "inventory_agent")
+            agent:       Worker agent to invoke
+            agent_name:  Metric dimension (e.g. "InventoryAgent")
+            session_id:  The current session identifier
+            customer_id: Session customer, bound to the worker for tool-level isolation
+            prompt:      Prompt sent to the worker
+
+        Returns:
+            The worker's text result
+        """
+        # 1. Read the WorkflowState and note its version (optimistic locking)
+        state = _ensure_state(session_id, customer_id or 'UNKNOWN')
+        version = int(state['version'])
+        # 2. Invoke the worker with a fresh history, bound to the session's customer
+        trace.step_start(column)
+        agent.messages = []
+        agent.state.set('session_customer_id', customer_id or state.get('customer_id'))
+        started = time.perf_counter()
+        agent_result = agent(prompt)
+        _emit_agent_metrics(agent_name, (time.perf_counter() - started) * 1000,
+                            _guardrail_intervened(agent_result))
+        result = str(agent_result)
+        # 3. Write the result with expected_version
+        _update_workflow_state(session_id, {column: result}, expected_version=version)
+        trace.step_done(column, version)
+        return result
+
     @tool
     def route_to_inventory_agent(session_id: str, customer_id: str, request: str) -> str:
         """
@@ -968,18 +1287,8 @@ customer-facing content."""
         Returns:
             Inventory facts retrieved by the InventoryAgent
         """
-        # 1. Read the WorkflowState and note its version (optimistic locking)
-        state = _ensure_state(session_id, customer_id)
-        version = int(state['version'])
-        # 2. Invoke the worker with a fresh history
-        trace.step_start('inventory_agent')
-        inventory_agent.messages = []
-        result = str(inventory_agent(
-            f"[Session ID: {session_id}] [Customer ID: {customer_id}] {request}"))
-        # 3. Write the result with expected_version
-        _update_workflow_state(session_id, {'inventory_agent': result}, expected_version=version)
-        trace.step_done('inventory_agent', version)
-        return result
+        return _run_worker('inventory_agent', inventory_agent, 'InventoryAgent', session_id,
+                           customer_id, f"[Session ID: {session_id}] [Customer ID: {customer_id}] {request}")
 
     @tool
     def route_to_policy_agent(session_id: str, request: str) -> str:
@@ -994,17 +1303,8 @@ customer-facing content."""
         Returns:
             Policy information retrieved and synthesized by PolicyAgent
         """
-        # 1. Read the WorkflowState and note its version
-        state = _ensure_state(session_id, 'UNKNOWN')
-        version = int(state['version'])
-        # 2. Invoke the PolicyAgent (parallel RAG over the 3 KBs)
-        trace.step_start('policy_agent')
-        policy_agent.messages = []
-        result = str(policy_agent(request))
-        # 3. Write the result with expected_version
-        _update_workflow_state(session_id, {'policy_agent': result}, expected_version=version)
-        trace.step_done('policy_agent', version)
-        return result
+        return _run_worker('policy_agent', policy_agent, 'PolicyAgent', session_id,
+                           turn['customer_id'], request)
 
     @tool
     def route_to_refund_agent(session_id: str, customer_id: str, request: str) -> str:
@@ -1020,18 +1320,8 @@ customer-facing content."""
         Returns:
             Refund decision from the RefundAgent
         """
-        # 1. Read the WorkflowState and note its version
-        state = _ensure_state(session_id, customer_id)
-        version = int(state['version'])
-        # 2. Invoke the RefundAgent (it reads inventory_agent from the WorkflowState itself)
-        trace.step_start('refund_agent')
-        refund_agent.messages = []
-        result = str(refund_agent(
-            f"[Session ID: {session_id}] [Customer ID: {customer_id}] {request}"))
-        # 3. Write the result with expected_version
-        _update_workflow_state(session_id, {'refund_agent': result}, expected_version=version)
-        trace.step_done('refund_agent', version)
-        return result
+        return _run_worker('refund_agent', refund_agent, 'RefundAgent', session_id,
+                           customer_id, f"[Session ID: {session_id}] [Customer ID: {customer_id}] {request}")
 
     @tool
     def route_to_communication_agent(session_id: str, customer_id: str,
@@ -1048,20 +1338,17 @@ customer-facing content."""
         Returns:
             Final customer-facing response drafted by CommunicationAgent
         """
-        # 1. Read the WorkflowState and note its version
-        state = _ensure_state(session_id, customer_id)
-        version = int(state['version'])
-        # 2. Invoke the CommunicationAgent (it reads the whole WorkflowState)
-        trace.step_start('communication_agent')
-        communication_agent.messages = []
-        result = str(communication_agent(
-            f"[Session ID: {session_id}] [Customer ID: {customer_id}] "
-            f"Original request: {original_request}"))
-        # 3. Write the final reply: this column is what chat, demo and the runtime return
-        _update_workflow_state(session_id, {'communication_agent': result},
-                               expected_version=version)
-        trace.step_done('communication_agent', version)
-        return result
+        # Its column is what chat, demo and the runtime return to the customer
+        turn['communication_done'] = True
+        prompt = (f"[Session ID: {session_id}] [Customer ID: {customer_id}] "
+                  f"Original request: {original_request}")
+        history = _conversation_so_far()
+        if history:
+            # Earlier turns of the session (persisted in DynamoDB), so references such as
+            # "the order I asked about earlier" can be answered
+            prompt += f"\n\nConversation so far in this session (oldest first):\n{history}"
+        return _run_worker('communication_agent', communication_agent, 'CommunicationAgent',
+                           session_id, customer_id, prompt)
 
     @tool
     def initialize_session(session_id: str, customer_id: str) -> str:
@@ -1099,18 +1386,53 @@ customer-facing content."""
         return (f"Session {session_id} already existed: previous results cleared "
                 f"for this new request (version {version + 1}).")
 
-    return Agent(
+    def _end_turn(event: AfterInvocationEvent) -> None:
+        """
+        Strands hook: enforce Rules 1 and 6 in code and record orchestrator metrics.
+
+        If the model ended the request without calling route_to_communication_agent
+        (seen in adversarial testing: it refused a cross-customer request by itself),
+        the WorkflowState is ensured and the CommunicationAgent writes the reply anyway.
+
+        Args:
+            event: AfterInvocationEvent (holds the orchestrator result)
+        """
+        if not turn['customer_id']:
+            return
+        blocked = _guardrail_intervened(event.result)
+        _emit_agent_metrics('OrchestratorAgent', (time.perf_counter() - turn['t0']) * 1000, blocked)
+        if turn['communication_done']:
+            return
+        logger.warning("Rule 6 enforced in code: CommunicationAgent was not called (session %s)",
+                       turn['session_id'])
+        try:
+            route_to_communication_agent(session_id=turn['session_id'], customer_id=turn['customer_id'],
+                                         original_request=turn['request'])
+        except Exception as exc:
+            logger.warning("Rule 6 enforcement failed: %s", exc)
+
+    # Optional persistent session (DynamoDB); agent_id is required by session managers
+    session_manager = (
+        RepositorySessionManager(session_id=session_id, session_repository=DynamoDBSessionRepository())
+        if session_id else None
+    )
+
+    orchestrator = Agent(
         name='OrchestratorAgent',
+        agent_id='orchestrator',
         model=model,
         system_prompt=system_prompt,
         tools=[initialize_session, route_to_inventory_agent, route_to_policy_agent,
                route_to_refund_agent, route_to_communication_agent],
-        hooks=[_isolate_sessions],
+        hooks=[_start_turn, _end_turn],
+        session_manager=session_manager,
         # Sequential tool execution: by default Strands runs the tool calls of one turn
         # concurrently, which started RefundAgent before InventoryAgent had finished
         # (empty WorkflowState)
         tool_executor=SequentialToolExecutor(),
     )
+    orchestrator_ref['agent'] = orchestrator
+    return orchestrator
 
 
 # ═══════════════════════════════════════════════════════

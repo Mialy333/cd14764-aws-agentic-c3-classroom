@@ -16,13 +16,13 @@
   AgentCore Role:            arn:aws:iam::053670098006:role/udacity-agentcore-agentcore-role
   Agent Log Group:           /aws/bedrock/agentcore/udacity-agentcore
   --------------------------------------------------------
-  Returns KB ID:             (not yet created)
-  Shipping KB ID:            (not yet created)
-  Warranty KB ID:            (not yet created)
+  Returns KB ID:             UOM8KM5NPK
+  Shipping KB ID:            VFHKVWDNB8
+  Warranty KB ID:            D3ZBNTF9K6
   --------------------------------------------------------
   Runtime Name:              udacity_agentcore_runtime
-  Runtime ARN:               (not yet deployed)
-  Guardrail ID:              (not yet created)
-  Guardrail Version:         (not yet created)
+  Runtime ARN:               arn:aws:bedrock-agentcore:us-east-1:053670098006:runtime/udacity_agentcore_runtime-RFDiPt97es
+  Guardrail ID:              jtjyz5e3odep
+  Guardrail Version:         2
 ============================================================
 

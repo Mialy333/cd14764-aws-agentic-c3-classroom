@@ -780,13 +780,40 @@ def build_communication_agent() -> Agent:
     and composing a coherent, empathetic response.
     """
 
-    # TODO: Create a BedrockModel
-    pass
+    # Modèle worker (Sonnet 4.5) ; température 0.3 pour un ton chaleureux et naturel
+    model = BedrockModel(
+        model_id=config.WORKER_MODEL_ID,
+        temperature=0.3,
+        region_name=config.AWS_REGION,
+    )
 
-    # TODO: System prompt for the Communication Agent
-    pass
+    # Prompt système : rédaction finale fidèle au WorkflowState, ton empathique
+    system_prompt = """You are the CommunicationAgent of NovaMart customer support. You write the
+FINAL message that the customer will read.
 
-    # TODO: Implement get_full_workflow_context
+Process:
+1. ALWAYS call get_full_workflow_context(session_id) FIRST to read every finding gathered
+   for this session: inventory_agent (order and account facts), policy_agent (policy answer)
+   and refund_agent (return decision).
+2. Write one reply that answers the customer's original request using ALL relevant findings:
+   - order or account facts (product, status, dates, tier) when present;
+   - policy details when present, keeping the facts and numbers exactly as given;
+   - the return decision when present: if approved, give the return reference, refund amount
+     and next steps; if denied, explain the reason kindly and mention any alternative that
+     appears in the findings.
+3. Never invent facts, prices, dates, references or policies that are not in the findings.
+   If information is missing, say what you could not confirm and how the customer can get help.
+4. Calculation requests (no other agent ran): compute it yourself, step by step, and show the
+   working briefly. Apply discounts to the full amount and round currency to the nearest cent
+   only at the very end (round half up).
+5. Tone: warm, professional and empathetic. Greet the customer by first name when known,
+   be concise, and end with an offer of further help.
+6. Never mention internal agents, tools, sessions, "findings" or the WorkflowState.
+
+Output format: your final answer is sent to the customer AS IS. It must contain ONLY the
+customer message, starting directly with the greeting - no preamble, no reasoning, no
+comment about the request type or the available information, no separator line."""
+
     @tool
     def get_full_workflow_context(session_id: str) -> dict:
         """
@@ -796,12 +823,24 @@ def build_communication_agent() -> Agent:
             session_id: The current session identifier
 
         Returns:
-            Full WorkflowState dict (inventory_agent, policy_agent, refund_agent)
+            Full WorkflowState dict (customer_id, inventory_agent, policy_agent,
+            refund_agent, version...), or a not-found message
         """
-        pass
+        state = _read_workflow_state(session_id)
+        if not state:
+            return {'session_id': session_id, 'found': False,
+                    'message': f"No WorkflowState found for session {session_id}."}
+        # Decimal (version, ttl) → types JSON natifs
+        context = _to_json_safe(state)
+        context['found'] = True
+        return context
 
-    # TODO: Instantiate and return the Agent
-    pass
+    return Agent(
+        name='CommunicationAgent',
+        model=model,
+        system_prompt=system_prompt,
+        tools=[get_full_workflow_context],
+    )
 
 
 # ───────────────────────────────────────────────────────

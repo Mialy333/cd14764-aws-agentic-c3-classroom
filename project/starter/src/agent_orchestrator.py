@@ -402,13 +402,40 @@ def build_refund_agent() -> Agent:
     WorkflowState and applies the correct policy window per customer tier.
     """
 
-    # TODO: Create a BedrockModel
-    pass
+    # Fenêtres de retour par palier (jours depuis order_date) : Standard 30, Premium 60
+    return_windows = {'Standard': 30, 'Premium': 60}
 
-    # TODO: System prompt for the Refund Agent
-    pass
+    # Modèle worker (Sonnet 4.5) ; température basse : décision reproductible
+    model = BedrockModel(
+        model_id=config.WORKER_MODEL_ID,
+        temperature=0.1,
+        region_name=config.AWS_REGION,
+    )
 
-    # TODO: Implement get_inventory_context
+    # Prompt système : procédure de décision en étapes, fenêtres explicites
+    system_prompt = """You are the RefundAgent of NovaMart customer support.
+You decide whether a return/refund request is eligible, based ONLY on facts
+gathered by the InventoryAgent, and you process eligible returns.
+
+Return windows (counted from the order date, using days_since_order):
+- Standard tier: 30 days
+- Premium tier: 60 days
+
+Decision process - follow it in order:
+1. ALWAYS call get_inventory_context(session_id) FIRST to read the InventoryAgent findings.
+   If no inventory facts are available, do not guess: say the order facts are missing.
+2. Identify the customer tier, the order status and days_since_order.
+3. Eligibility rules:
+   - the order status must be "delivered" (shipped, processing or cancelled orders cannot be returned);
+   - days_since_order must be <= 30 for Standard customers, <= 60 for Premium customers.
+4. If eligible, call initiate_refund(customer_id, order_id, reason) with the customer's reason
+   (use "Customer requested return" if none was given).
+5. If not eligible, do NOT call initiate_refund.
+
+Answer with a short decision summary: decision (APPROVED or DENIED), customer tier, applicable
+window, days_since_order, order status, the reason for the decision and, if approved, the
+return_reference and next steps returned by initiate_refund. Never invent a return reference."""
+
     @tool
     def get_inventory_context(session_id: str) -> dict:
         """
@@ -418,15 +445,33 @@ def build_refund_agent() -> Agent:
             session_id: The current session identifier
 
         Returns:
-            The inventory_agent field from WorkflowState, or empty dict if not yet set
+            Dict with session_id, customer_id and the inventory_agent findings,
+            or a message saying the facts are not available yet
         """
-        pass
+        state = _read_workflow_state(session_id)
+        if not state:
+            return {'session_id': session_id, 'found': False,
+                    'message': f"No WorkflowState found for session {session_id}."}
+        inventory = state.get('inventory_agent')
+        if not inventory:
+            return {'session_id': session_id, 'found': False,
+                    'message': 'InventoryAgent has not run yet for this session.'}
+        return {
+            'session_id':      session_id,
+            'customer_id':     state.get('customer_id'),
+            'found':           True,
+            'inventory_agent': inventory,
+        }
 
-    # TODO: Implement initiate_refund
     @tool
     def initiate_refund(customer_id: str, order_id: str, reason: str) -> dict:
         """
         Initiate a return by updating the order record in DynamoDB.
+
+        Re-checks the eligibility rules in code (status delivered, 30-day window for
+        Standard, 60-day window for Premium) before writing, so a model error can never
+        approve an ineligible return. Idempotent: a second call on the same order
+        returns the existing return reference.
 
         Args:
             customer_id: The customer's unique identifier
@@ -434,12 +479,82 @@ def build_refund_agent() -> Agent:
             reason: Customer-provided reason for the return
 
         Returns:
-            Confirmation dict with return_reference number and instructions
+            Confirmation dict with return_reference number and instructions,
+            or a refusal dict with the reason
         """
-        pass
+        orders_table = dynamodb.Table(config.ORDERS_TABLE)
+        customers_table = dynamodb.Table(config.CUSTOMERS_TABLE)
+        try:
+            order = orders_table.get_item(
+                Key={'customer_id': customer_id, 'order_id': order_id}).get('Item')
+            customer = customers_table.get_item(Key={'customer_id': customer_id}).get('Item')
+        except ClientError as exc:
+            return {'success': False, 'error': f"DynamoDB error: {exc.response['Error']['Message']}"}
 
-    # TODO: Instantiate and return the Agent
-    pass
+        if not order or not customer:
+            return {'success': False,
+                    'message': f"Order {order_id} or customer {customer_id} not found."}
+
+        # Idempotence : retour déjà initié → on renvoie la référence existante
+        if order.get('status') == 'return_initiated':
+            return {'success': True, 'already_initiated': True,
+                    'order_id': order_id,
+                    'return_reference': order.get('return_reference'),
+                    'message': 'A return was already initiated for this order.'}
+
+        # Garde-fou côté code : la décision du LLM est revérifiée avant toute écriture
+        tier = customer.get('tier', 'Standard')
+        window = return_windows.get(tier, return_windows['Standard'])
+        days = _days_since(order.get('order_date'))
+        if order.get('status') != 'delivered':
+            return {'success': False, 'order_id': order_id,
+                    'message': f"Order status is '{order.get('status')}'; only delivered orders can be returned."}
+        if days is None or days > window:
+            return {'success': False, 'order_id': order_id, 'tier': tier,
+                    'window_days': window, 'days_since_order': days,
+                    'message': f"Outside the {window}-day return window for {tier} customers."}
+
+        return_reference = f"RET-{uuid.uuid4().hex[:8].upper()}"
+        initiated_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        try:
+            # Écriture conditionnelle : la commande doit toujours être "delivered"
+            orders_table.update_item(
+                Key={'customer_id': customer_id, 'order_id': order_id},
+                UpdateExpression=('SET #s = :new_status, return_reference = :ref, '
+                                  'return_reason = :reason, return_initiated_at = :ts'),
+                ConditionExpression='#s = :delivered',
+                ExpressionAttributeNames={'#s': 'status'},
+                ExpressionAttributeValues={
+                    ':new_status': 'return_initiated',
+                    ':ref':        return_reference,
+                    ':reason':     reason,
+                    ':ts':         initiated_at,
+                    ':delivered':  'delivered',
+                },
+            )
+        except ClientError as exc:
+            return {'success': False, 'error': f"Could not update order: {exc.response['Error']['Message']}"}
+
+        return {
+            'success':          True,
+            'order_id':         order_id,
+            'customer_id':      customer_id,
+            'tier':             tier,
+            'window_days':      window,
+            'days_since_order': days,
+            'return_reference': return_reference,
+            'refund_amount':    order.get('price'),
+            'instructions': ('Log in to your account, open Order History, print the prepaid '
+                             'return label and drop the package at any authorized carrier. '
+                             'Refunds are processed within 5-7 business days of receipt.'),
+        }
+
+    return Agent(
+        name='RefundAgent',
+        model=model,
+        system_prompt=system_prompt,
+        tools=[get_inventory_context, initiate_refund],
+    )
 
 
 # ───────────────────────────────────────────────────────

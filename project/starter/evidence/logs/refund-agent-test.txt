@@ -1,0 +1,98 @@
+Tool #1: check_order_status
+
+Tool #2: get_customer_tier
+## Fact Sheet
+
+**Customer:**
+- Customer ID: CUST-002
+- Name: Bob Smith
+- Tier: Standard
+- Email: bob@example.com
+- Total Orders: 12
+
+**Order:**
+- Order ID: ORD-28001
+- Product: Mechanical Keyboard K2
+- Category: Electronics
+- Status: Delivered
+- Order Date: 2026-08-22
+- Estimated Delivery: 2026-08-27
+- Days Since Order: 45
+- Price: $89.99
+- Quantity: 1
+- Tracking Number: TRK100023857
+
+---
+
+*Note: Return eligibility determination will be handled by the RefundAgent.*
+===== CUST-002 ORD-28001
+I'll help you with your return request. Let me first check the order details and your eligibility.
+Tool #1: get_inventory_context
+Based on the order details, I need to inform you of the following:
+
+**DECISION: DENIED**
+
+**Details:**
+- **Customer Tier:** Standard
+- **Applicable Return Window:** 30 days
+- **Days Since Order:** 45 days
+- **Order Status:** Delivered
+- **Reason for Denial:** Your order exceeds the 30-day return window for Standard tier customers. The order was placed 45 days ago, which is 15 days past the eligible return period.
+
+**Explanation:**
+While your order ORD-28001 (Mechanical Keyboard K2) was successfully delivered, it is no longer eligible for return because it was ordered on 2026-08-22, which is 45 days ago. Standard tier customers have a 30-day return window from the order date.
+
+If you have any questions about this policy or would like to discuss other options, please let me know.
+Tool #3: check_order_status
+
+Tool #4: get_customer_tier
+## Fact Sheet
+
+**Customer:**
+- Customer ID: CUST-004
+- Name: David Lee
+- Tier: Standard
+- Email: david@example.com
+- Total Orders: 5
+
+**Order:**
+- Order ID: ORD-30001
+- Product: Phone Case Slim
+- Category: Accessories
+- Status: Delivered
+- Order Date: 2026-09-16
+- Estimated Delivery: 2026-09-21
+- Days Since Order: 20
+- Price: $19.99
+- Quantity: 1
+- Tracking Number: TRK100071371
+
+---
+
+*Note: Return eligibility determination will be handled by the RefundAgent.*
+===== CUST-004 ORD-30001
+I'll help you with your return request. Let me first check the order details and your eligibility.
+Tool #2: get_inventory_context
+Great news! Your order is eligible for return. Let me process that for you now.
+Tool #3: initiate_refund
+**DECISION: APPROVED**
+
+**Details:**
+- **Customer Tier:** Standard
+- **Applicable Return Window:** 30 days
+- **Days Since Order:** 20 days
+- **Order Status:** Delivered
+- **Reason for Approval:** Your order is within the 30-day return window and has been delivered.
+
+**Return Confirmation:**
+- **Return Reference:** RET-793AFDE5
+- **Refund Amount:** $19.99
+
+**Next Steps:**
+1. Log in to your account
+2. Open Order History
+3. Print the prepaid return label
+4. Drop the package at any authorized carrier
+5. Your refund will be processed within 5-7 business days of receipt
+
+Your return for order ORD-30001 (Phone Case Slim) has been successfully initiated. If you have any questions, please don't hesitate to ask!%                         

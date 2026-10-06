@@ -1397,7 +1397,9 @@ customer-facing content."""
         Args:
             event: AfterInvocationEvent (holds the orchestrator result)
         """
-        if not turn['customer_id']:
+        # Nothing to enforce when the invocation itself failed (no result): the error
+        # propagates to the caller instead of producing a reply
+        if not turn['customer_id'] or event.result is None:
             return
         blocked = _guardrail_intervened(event.result)
         _emit_agent_metrics('OrchestratorAgent', (time.perf_counter() - turn['t0']) * 1000, blocked)

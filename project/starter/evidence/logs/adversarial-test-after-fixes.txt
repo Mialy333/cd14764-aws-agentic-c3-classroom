@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "/Users/mialyratsimbazafy/NDAE2026/cd14764-aws-agentic-c3-classroom/project/starter/scripts/adversarial_test.py", line 136, in <module>
+    main()
+  File "/Users/mialyratsimbazafy/NDAE2026/cd14764-aws-agentic-c3-classroom/project/starter/scripts/adversarial_test.py", line 104, in main
+    attribution = _guardrail_attribution(request)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mialyratsimbazafy/NDAE2026/cd14764-aws-agentic-c3-classroom/project/starter/scripts/adversarial_test.py", line 77, in _guardrail_attribution
+    r = RUNTIME.apply_guardrail(guardrailIdentifier=config.GUARDRAIL_ID,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mialyratsimbazafy/NDAE2026/cd14764-aws-agentic-c3-classroom/project/starter/venv/lib/python3.12/site-packages/botocore/client.py", line 606, in _api_call
+    return self._make_api_call(operation_name, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mialyratsimbazafy/NDAE2026/cd14764-aws-agentic-c3-classroom/project/starter/venv/lib/python3.12/site-packages/botocore/context.py", line 123, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mialyratsimbazafy/NDAE2026/cd14764-aws-agentic-c3-classroom/project/starter/venv/lib/python3.12/site-packages/botocore/client.py", line 1094, in _make_api_call
+    raise error_class(parsed_response, operation_name)
+botocore.errorfactory.AccessDeniedException: An error occurred (AccessDeniedException) when calling the ApplyGuardrail operation: User: arn:aws:sts::053670098006:assumed-role/voclabs/user5299085=46731d46-243f-4e06-b3c0-e62563006feb is not authorized to perform: bedrock:ApplyGuardrail on resource: arn:aws:bedrock:us-east-1:053670098006:guardrail/jtjyz5e3odep with an explicit deny in an identity-based policy: arn:aws:iam::053670098006:policy/voc-cancel-cred

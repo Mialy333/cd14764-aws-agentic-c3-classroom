@@ -1,17 +1,21 @@
 """
-Remplace une section « 2.X » de src/agent_orchestrator.py par un bloc fourni.
+Replace one or more sections of src/agent_orchestrator.py with the provided blocks.
 
-Usage (depuis project/starter) :
-    python scripts/apply_block.py ~/Downloads/etape2c_policy_agent.py
+Usage (from project/starter):
+    python scripts/apply_block.py path/to/block_file.py
 
-Le bloc doit commencer par la bannière de section, par exemple :
+Each section of the provided file starts with a banner, for example:
     # ───────────────────────────────────────────────────────
     #  2.C - POLICY AGENT - MULTI-AGENT RAG
     # ───────────────────────────────────────────────────────
-La section remplacée va de cette bannière jusqu'à la bannière suivante
-(ligne commençant par « # ─ » ou « # ═ » en colonne 0), exclue.
-Une sauvegarde src/agent_orchestrator.py.bak est créée avant écriture,
-puis le fichier est compilé pour détecter toute erreur de syntaxe.
+or
+    # ═══════════════════════════════════════════════════════
+    #  TASK 4 - MEMORY
+    # ═══════════════════════════════════════════════════════
+Recognized titles start with "#  2." or "#  TASK ". In the target file, a section runs
+from its banner up to the next banner (a line starting with "# ─" or "# ═" in column 0),
+excluded. A backup src/agent_orchestrator.py.bak is written first, then the file is
+compiled to catch any syntax error.
 """
 import pathlib
 import py_compile
@@ -19,37 +23,71 @@ import shutil
 import sys
 
 TARGET = pathlib.Path('src/agent_orchestrator.py')
+TITLE_PREFIXES = ('#  2.', '#  TASK ')
+
+
+def _split_sections(block: str) -> list:
+    """
+    Split the provided file into sections.
+
+    Args:
+        block: Content of the provided file
+
+    Returns:
+        List of (title, full section text including its banner) tuples
+    """
+    lines = block.splitlines(keepends=True)
+    starts = [i - 1 for i, line in enumerate(lines)
+              if line.startswith(TITLE_PREFIXES) and i > 0]
+    sections = []
+    for n, start in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        title = lines[start + 1].strip()
+        sections.append((title, ''.join(lines[start:end]).strip('\n')))
+    return sections
+
+
+def _replace_section(src: str, title: str, new_text: str) -> tuple:
+    """
+    Replace the section with the given title in src by new_text.
+
+    Args:
+        src:      Current content of the target file
+        title:    Section title (e.g. "#  TASK 4 - MEMORY")
+        new_text: New section, banner included
+
+    Returns:
+        Tuple (new content, size of the replaced section)
+    """
+    if src.count(title) != 1:
+        sys.exit(f"Title '{title}' found {src.count(title)} times in {TARGET} (expected 1).")
+    pos = src.index(title)
+    start = src.rfind('\n', 0, src.rfind('\n', 0, pos)) + 1
+    after_banner = src.index('\n', src.index('\n', pos) + 1) + 1
+    ends = [i for i in (src.find('\n# ─', after_banner), src.find('\n# ═', after_banner)) if i != -1]
+    if not ends:
+        sys.exit(f"No banner found after '{title}'.")
+    end = min(ends) + 1
+    return src[:start] + new_text + '\n\n\n' + src[end:], end - start
 
 
 def main() -> None:
-    """Applique le bloc passé en argument à la section correspondante."""
+    """Apply every section of the file given on the command line."""
     if len(sys.argv) != 2:
-        sys.exit("Usage : python scripts/apply_block.py <fichier_bloc.py>")
+        sys.exit("Usage: python scripts/apply_block.py <block_file.py>")
     block = pathlib.Path(sys.argv[1]).expanduser().read_text()
-
-    # Titre de section = première ligne « #  2.X - ... » du bloc
-    title = next((line.strip() for line in block.splitlines()
-                  if line.startswith('#  2.')), None)
-    if not title:
-        sys.exit("Bannière « #  2.X - ... » introuvable dans le bloc.")
+    sections = _split_sections(block)
+    if not sections:
+        sys.exit("No '#  2.X - ...' or '#  TASK N - ...' banner found in the block file.")
 
     src = TARGET.read_text()
-    if src.count(title) != 1:
-        sys.exit(f"Titre « {title} » trouvé {src.count(title)} fois dans {TARGET} (attendu : 1).")
-
-    pos = src.index(title)
-    start = src.rfind('\n', 0, src.rfind('\n', 0, pos)) + 1   # ligne de séparateur avant le titre
-    after_banner = src.index('\n', src.index('\n', pos) + 1) + 1  # après le séparateur de fermeture
-    ends = [i for i in (src.find('\n# ─', after_banner), src.find('\n# ═', after_banner)) if i != -1]
-    if not ends:
-        sys.exit("Bannière de section suivante introuvable.")
-    end = min(ends) + 1
-
     shutil.copy(TARGET, TARGET.with_suffix('.py.bak'))
-    TARGET.write_text(src[:start] + block.strip('\n') + '\n\n\n' + src[end:])
+    for title, text in sections:
+        src, old_size = _replace_section(src, title, text)
+        print(f"OK: section '{title}' replaced ({old_size} -> {len(text) + 1} characters).")
+    TARGET.write_text(src)
     py_compile.compile(str(TARGET), doraise=True)
-    print(f"OK : section « {title} » remplacée ({end - start} → {len(block)} caractères). "
-          f"Sauvegarde : {TARGET.with_suffix('.py.bak')}")
+    print(f"File compiles. Backup: {TARGET.with_suffix('.py.bak')}")
 
 
 if __name__ == '__main__':

@@ -1,0 +1,19 @@
+Cognito
+  OK      cognito-idp:CreateUserPool
+  OK      cognito-idp:CreateUserPoolClient
+IAM
+  OK      iam:CreateRole (Lambda trust)
+  OK      iam:PutRolePolicy
+Lambda
+  OK      lambda:CreateFunction
+  OK      lambda:CreateFunctionUrlConfig (AuthType NONE)
+  OK      lambda:AddPermission (public URL)
+  OK      lambda:AddPermission (InvokeFunction via URL)
+  OK      HTTPS call to the Function URL
+Cleanup
+  removed  delete Lambda function
+  removed  delete IAM role policy
+  removed  delete IAM role
+  skipped  delete user pool: An error occurred (AccessDeniedException) when calling the DeleteUserPool operation: User: arn:aws:sts::053670098006:ass
+
+Summary: 9/9 checks OK

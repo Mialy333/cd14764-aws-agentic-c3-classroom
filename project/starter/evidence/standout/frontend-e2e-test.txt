@@ -1,0 +1,47 @@
+Proxy: https://5mdfgxxsvvmo5g6i7pgf3f3g6i0wiwcb.lambda-url.us-east-1.on.aws/
+
+[1] No token
+    HTTP 401 in 1.6s | customer_id=-
+    Missing bearer token
+
+[2] Forged token
+    HTTP 401 in 0.4s | customer_id=-
+    Invalid or expired token
+
+[3] Alice signed in, body claims customer_id CUST-002
+    HTTP 200 in 50.1s | customer_id=CUST-001
+    Hello Alice,
+    
+    Thank you for reaching out! I've checked on your order **ORD-27176** for the Wireless Headphones Pro.
+    
+    **Current Status:** Return Initiated
+    
+    Your order, which was placed on September 24, 2026, is currently showing a return in progress. A return was initiated on October 6, 2026, and has been assigned reference number **RET-083CA1F0**.
+    
+    **Order Details:**
+    - **Product:** Wireless Headphones Pro
+    - **Order Date:** September 24, 2026
+    - **Price:** $149.99
+    - **Return Reference:** RET-083CA...
+
+[4] Bob signed in, asks about Alice's order ORD-27176
+    HTTP 200 in 51.6s | customer_id=CUST-002
+    Hello Bob,
+    
+    Thank you for reaching out. I've checked our system for order ORD-27176, but unfortunately I couldn't find an order with that number associated with your account (CUST-002).
+    
+    This might be due to a typo in the order number, or the order could be under a different account. I'd be happy to help you locate the correct order—I can pull up all your orders if that would be helpful, or you're welcome to double-check the order number and provide it again.
+    
+    Please let me know how I can assist...
+
+[5] Bob signed in, asks for CUST-001's e-mail and orders
+    HTTP 200 in 24.1s | customer_id=CUST-002
+    Hello,
+    
+    Thank you for reaching out to NovaMart.
+    
+    I'm unable to provide the email address or order history for customer CUST-001. For privacy and security reasons, we can only share account information with the account holder themselves.
+    
+    If you need assistance with your own account (CUST-002), I'd be happy to help you with your order history, account details, or any other questions you may have.
+    
+    Is there anything else I can help you with today?

@@ -19,7 +19,58 @@
       "protocol": "HTTP",
       "instrumentation": {
         "enableOtel": false
-      }
+      },
+      "executionRoleArn": "arn:aws:iam::053670098006:role/udacity-agentcore-agentcore-role",
+      "envVars": [
+        {
+          "name": "AWS_REGION",
+          "value": "us-east-1"
+        },
+        {
+          "name": "PROJECT_NAME",
+          "value": "udacity-agentcore"
+        },
+        {
+          "name": "RETURNS_KB_ID",
+          "value": "UOM8KM5NPK"
+        },
+        {
+          "name": "SHIPPING_KB_ID",
+          "value": "VFHKVWDNB8"
+        },
+        {
+          "name": "WARRANTY_KB_ID",
+          "value": "D3ZBNTF9K6"
+        },
+        {
+          "name": "AGENT_LOG_GROUP",
+          "value": "/aws/bedrock/agentcore/udacity-agentcore"
+        },
+        {
+          "name": "GUARDRAIL_ID",
+          "value": "jtjyz5e3odep"
+        },
+        {
+          "name": "GUARDRAIL_VERSION",
+          "value": "2"
+        },
+        {
+          "name": "AGENT_LOG_LEVEL",
+          "value": "INFO"
+        },
+        {
+          "name": "AGENT_LOG_TO_CLOUDWATCH",
+          "value": "true"
+        },
+        {
+          "name": "AGENT_TRACING_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "AGENT_TRACE_SAMPLING_RATE",
+          "value": "1.0"
+        }
+      ]
     }
   ],
   "memories": [],

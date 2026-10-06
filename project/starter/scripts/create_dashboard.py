@@ -3,7 +3,8 @@ Create the NovaMart-Agents CloudWatch dashboard (stand-out 7.2).
 
 Widgets:
   1. Agent invocations over time      - NovaMart/Agents AgentInvocations (Sum, per Agent)
-  2. Average latency per agent (ms)   - NovaMart/Agents AgentLatencyMs (Average, per Agent)
+  2. Average latency per agent (ms)   - NovaMart/Agents AgentLatencyMs (Average over the whole
+                                        selected time range, per Agent)
   3. Guardrail interventions          - AWS/Bedrock/Guardrails InvocationsIntervened (native)
                                         + NovaMart/Agents GuardrailBlocked (per Agent)
 The custom metrics are emitted by agent_orchestrator.py with the Embedded Metric Format.
@@ -57,7 +58,7 @@ def build_body() -> dict:
             'metrics': [_search('e1', f'{agents} MetricName="AgentInvocations"', 'Sum')]}},
         {'type': 'metric', 'x': 12, 'y': 2, 'width': 12, 'height': 7, 'properties': {
             'title': 'Average latency per agent (ms)', 'region': region, 'view': 'bar',
-            'period': PERIOD,
+            'period': PERIOD, 'setPeriodToTimeRange': True,
             'metrics': [_search('e2', f'{agents} MetricName="AgentLatencyMs"', 'Average')]}},
         {'type': 'metric', 'x': 0, 'y': 9, 'width': 24, 'height': 7, 'properties': {
             'title': 'Guardrail interventions', 'region': region, 'view': 'timeSeries',

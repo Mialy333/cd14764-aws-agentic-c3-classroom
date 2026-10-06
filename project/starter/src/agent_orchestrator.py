@@ -428,9 +428,12 @@ Decision process - follow it in order:
 3. Eligibility rules:
    - the order status must be "delivered" (shipped, processing or cancelled orders cannot be returned);
    - days_since_order must be <= 30 for Standard customers, <= 60 for Premium customers.
-4. If eligible, call initiate_refund(customer_id, order_id, reason) with the customer's reason
+4. If eligible AND the customer explicitly asks to return the order or get a refund, call
+   initiate_refund(customer_id, order_id, reason) with the customer's reason
    (use "Customer requested return" if none was given).
-5. If not eligible, do NOT call initiate_refund.
+5. If not eligible, do NOT call initiate_refund. If the customer only asks about the order
+   status or history (no return/refund requested), do NOT call initiate_refund either: just
+   state whether the order would be eligible for a return and until which day count.
 
 Answer with a short decision summary: decision (APPROVED or DENIED), customer tier, applicable
 window, days_since_order, order status, the reason for the decision and, if approved, the
@@ -856,24 +859,99 @@ def build_orchestrator_agent(
     """
     Build the Orchestrator Agent that routes requests and manages WorkflowState.
     """
+    import re
+    from strands.hooks import BeforeInvocationEvent
+    from strands.tools.executors import SequentialToolExecutor
 
-    # TODO: Create a BedrockModel using the ORCHESTRATOR model
-    pass
+    # Modèle orchestrateur (Haiku 4.5) ; température 0.0 : routage déterministe
+    model = BedrockModel(
+        model_id=config.ORCHESTRATOR_MODEL_ID,
+        temperature=0.0,
+        region_name=config.AWS_REGION,
+    )
 
-    # TODO: System prompt for the Orchestrator
+    # Prompt système : les 6 règles de routage du brief, sans exception
     # For arithmetic, skip Inventory, Policy and Refund, but still call
     # CommunicationAgent last. Round currency only after the full calculation.
-    pass
+    system_prompt = """You are the OrchestratorAgent of NovaMart customer support.
+You NEVER answer the customer yourself: you route every request to specialist agents
+through your tools, and the CommunicationAgent writes the final reply.
 
-    # Each routing tool follows the same pattern:
-    #   1. read the current WorkflowState  (_read_workflow_state)
-    #   2. invoke the worker agent
-    #   3. write its result back with optimistic locking
-    #      (_update_workflow_state(session_id, {'<column>': text}, expected_version))
-    # The terminal trace UI can show each step: call trace.step_start('inventory_agent')
-    # before the worker runs and trace.step_done('inventory_agent', old_version) after.
+Each message starts with "[Session ID: <session_id>] [Customer ID: <customer_id>]" followed by
+the customer's request. Pass these exact values to your tools, and pass the customer's request
+word for word as `request` / `original_request`.
 
-    # TODO: Implement route_to_inventory_agent
+ROUTING RULES - apply them strictly, in this order:
+Rule 1 - EVERY request: call initialize_session(session_id, customer_id) FIRST.
+Rule 2 - Order status, order history, return or refund requests: call route_to_inventory_agent
+         first, THEN ALWAYS route_to_refund_agent - including simple status questions such as
+         "where is my order?" (the RefundAgent then only reports return eligibility and does
+         not start a return the customer did not ask for).
+Rule 3 - Policy meaning questions (return windows, shipping options and rates, warranty terms,
+         tier benefits in general): call route_to_policy_agent.
+Rule 4 - Account questions about the customer ("what is my tier?", "am I premium?", "my account"):
+         call route_to_inventory_agent ONLY. NEVER call route_to_policy_agent for these - the
+         PolicyAgent only knows policy text, not customer data.
+Rule 5 - Math / calculation questions (prices, discounts, totals): call NO worker agent (no
+         Inventory, no Policy, no Refund) - go straight to route_to_communication_agent, which
+         performs the calculation. Round currency only after the full calculation.
+Rule 6 - EVERY request: route_to_communication_agent(session_id, customer_id, original_request)
+         is ALWAYS your LAST tool call - no exceptions, even for unclear or off-topic requests.
+
+Call your tools ONE AT A TIME and wait for each result before the next call: every agent
+reads what the previous one wrote (the RefundAgent needs the InventoryAgent facts).
+
+A request can match several rules (e.g. a return request that also asks about the policy):
+then call every matching worker (Inventory, then Refund, then Policy) before the
+CommunicationAgent. Call each tool at most once per request. Never call a worker that no rule
+requires.
+
+After route_to_communication_agent returns, your final answer is EXACTLY the text it returned,
+copied verbatim: do not add, remove, rephrase or summarize anything. Never write your own
+customer-facing content."""
+
+    # ── Isolation des sessions ────────────────────────────────────────
+    # Le même orchestrateur sert plusieurs sessions (runtime AgentCore) : on vide son
+    # historique quand le Session ID change, pour qu'aucun contexte ne passe d'un client
+    # à l'autre, tout en gardant la conversation multi-tours d'une même session (chat).
+    current_session = {'id': None}
+
+    def _isolate_sessions(event: BeforeInvocationEvent) -> None:
+        """
+        Hook Strands : vide l'historique de l'orchestrateur à chaque nouveau Session ID.
+
+        Args:
+            event: Événement BeforeInvocationEvent (contient les messages entrants)
+        """
+        text = ' '.join(block.get('text', '')
+                        for message in (event.messages or [])
+                        for block in message.get('content', []))
+        match = re.search(r'\[Session ID:\s*([^\]]+)\]', text)
+        if match and match.group(1).strip() != current_session['id']:
+            event.agent.messages.clear()
+            current_session['id'] = match.group(1).strip()
+
+    def _ensure_state(session_id: str, customer_id: str) -> dict:
+        """
+        Lit le WorkflowState de la session, en le créant s'il manque (filet de sécurité
+        si initialize_session n'a pas été appelé).
+
+        Args:
+            session_id:  The current session identifier
+            customer_id: The customer's unique identifier
+
+        Returns:
+            The current WorkflowState record (with its version)
+        """
+        state = _read_workflow_state(session_id)
+        if state is None:
+            try:
+                _create_workflow_state(session_id, customer_id)
+            except ClientError:
+                pass   # créé entre-temps par un autre appel
+            state = _read_workflow_state(session_id)
+        return state
+
     @tool
     def route_to_inventory_agent(session_id: str, customer_id: str, request: str) -> str:
         """
@@ -888,9 +966,19 @@ def build_orchestrator_agent(
         Returns:
             Inventory facts retrieved by the InventoryAgent
         """
-        pass
+        # 1. Lire le WorkflowState et noter la version (verrouillage optimiste)
+        state = _ensure_state(session_id, customer_id)
+        version = int(state['version'])
+        # 2. Invoquer le worker avec un historique vierge
+        trace.step_start('inventory_agent')
+        inventory_agent.messages = []
+        result = str(inventory_agent(
+            f"[Session ID: {session_id}] [Customer ID: {customer_id}] {request}"))
+        # 3. Écrire le résultat avec expected_version
+        _update_workflow_state(session_id, {'inventory_agent': result}, expected_version=version)
+        trace.step_done('inventory_agent', version)
+        return result
 
-    # TODO: Implement route_to_policy_agent
     @tool
     def route_to_policy_agent(session_id: str, request: str) -> str:
         """
@@ -904,9 +992,18 @@ def build_orchestrator_agent(
         Returns:
             Policy information retrieved and synthesized by PolicyAgent
         """
-        pass
+        # 1. Lire le WorkflowState et noter la version
+        state = _ensure_state(session_id, 'UNKNOWN')
+        version = int(state['version'])
+        # 2. Invoquer le PolicyAgent (RAG parallèle sur les 3 KB)
+        trace.step_start('policy_agent')
+        policy_agent.messages = []
+        result = str(policy_agent(request))
+        # 3. Écrire le résultat avec expected_version
+        _update_workflow_state(session_id, {'policy_agent': result}, expected_version=version)
+        trace.step_done('policy_agent', version)
+        return result
 
-    # TODO: Implement route_to_refund_agent
     @tool
     def route_to_refund_agent(session_id: str, customer_id: str, request: str) -> str:
         """
@@ -921,9 +1018,19 @@ def build_orchestrator_agent(
         Returns:
             Refund decision from the RefundAgent
         """
-        pass
+        # 1. Lire le WorkflowState et noter la version
+        state = _ensure_state(session_id, customer_id)
+        version = int(state['version'])
+        # 2. Invoquer le RefundAgent (il relit lui-même inventory_agent dans le WorkflowState)
+        trace.step_start('refund_agent')
+        refund_agent.messages = []
+        result = str(refund_agent(
+            f"[Session ID: {session_id}] [Customer ID: {customer_id}] {request}"))
+        # 3. Écrire le résultat avec expected_version
+        _update_workflow_state(session_id, {'refund_agent': result}, expected_version=version)
+        trace.step_done('refund_agent', version)
+        return result
 
-    # TODO: Implement route_to_communication_agent
     @tool
     def route_to_communication_agent(session_id: str, customer_id: str,
                                      original_request: str) -> str:
@@ -939,14 +1046,29 @@ def build_orchestrator_agent(
         Returns:
             Final customer-facing response drafted by CommunicationAgent
         """
-        pass
+        # 1. Lire le WorkflowState et noter la version
+        state = _ensure_state(session_id, customer_id)
+        version = int(state['version'])
+        # 2. Invoquer le CommunicationAgent (il lit tout le WorkflowState)
+        trace.step_start('communication_agent')
+        communication_agent.messages = []
+        result = str(communication_agent(
+            f"[Session ID: {session_id}] [Customer ID: {customer_id}] "
+            f"Original request: {original_request}"))
+        # 3. Écrire la réponse finale : c'est elle que lisent chat, demo et le runtime
+        _update_workflow_state(session_id, {'communication_agent': result},
+                               expected_version=version)
+        trace.step_done('communication_agent', version)
+        return result
 
-    # TODO: Implement initialize_session
     @tool
     def initialize_session(session_id: str, customer_id: str) -> str:
         """
         Create a blank WorkflowState record at the start of each new session.
         Call this at the VERY BEGINNING of processing every customer request.
+
+        If the session already exists (new turn of the same chat session), the
+        previous turn's agent results are cleared so they cannot leak into this answer.
 
         Args:
             session_id:  A unique identifier for this session
@@ -955,10 +1077,38 @@ def build_orchestrator_agent(
         Returns:
             Confirmation that the session was initialized
         """
-        pass
+        try:
+            _create_workflow_state(session_id, customer_id)
+            return f"Session {session_id} initialized for customer {customer_id} (version 0)."
+        except ClientError as exc:
+            if exc.response['Error']['Code'] != 'ConditionalCheckFailedException':
+                raise
+        # Session existante (chat multi-tours) : on efface les résultats du tour précédent
+        state = _read_workflow_state(session_id)
+        version = int(state['version'])
+        dynamodb.Table(config.WORKFLOW_STATE_TABLE).update_item(
+            Key={'session_id': session_id},
+            UpdateExpression=('REMOVE inventory_agent, policy_agent, refund_agent, '
+                              'communication_agent SET version = :new_version'),
+            ConditionExpression='version = :expected_version',
+            ExpressionAttributeValues={':new_version': version + 1,
+                                       ':expected_version': version},
+        )
+        return (f"Session {session_id} already existed: previous results cleared "
+                f"for this new request (version {version + 1}).")
 
-    # TODO: Instantiate and return the OrchestratorAgent
-    pass
+    return Agent(
+        name='OrchestratorAgent',
+        model=model,
+        system_prompt=system_prompt,
+        tools=[initialize_session, route_to_inventory_agent, route_to_policy_agent,
+               route_to_refund_agent, route_to_communication_agent],
+        hooks=[_isolate_sessions],
+        # Exécution séquentielle des outils : par défaut Strands exécute en parallèle les
+        # appels d'outils émis dans un même tour, ce qui lançait RefundAgent avant la fin
+        # d'InventoryAgent (WorkflowState encore vide)
+        tool_executor=SequentialToolExecutor(),
+    )
 
 
 # ═══════════════════════════════════════════════════════

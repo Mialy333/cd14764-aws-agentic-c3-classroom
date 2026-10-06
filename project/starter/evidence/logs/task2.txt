@@ -1,0 +1,20 @@
+
+[1m[96m───────────────────────────────────────────────────────[0m
+[1m[96m  Task 2 - Multi-Agent Orchestration[0m
+[1m[96m───────────────────────────────────────────────────────[0m
+  [92m✓ PASS[0m [+5pts] build_inventory_agent() returns an Agent object
+  [92m✓ PASS[0m [+5pts] InventoryAgent has 3 tools (3 found)
+  [92m✓ PASS[0m [+5pts] build_policy_agent() returns an Agent object
+  [92m✓ PASS[0m [+5pts] PolicyAgent has 1 tool (1 found)
+  [92m✓ PASS[0m [+5pts] build_orchestrator_agent() returns an Agent object
+  [92m✓ PASS[0m [+5pts] OrchestratorAgent has 5 routing tools (5 found)
+  [92m✓ PASS[0m [+5pts] OrchestratorAgent uses config.ORCHESTRATOR_MODEL_ID (Claude Haiku 4.5 - correct for routing)
+  [92m✓ PASS[0m [+5pts] Worker agents use config.WORKER_MODEL_ID (Claude Sonnet 4.5 - correct for reasoning)
+  [92m✓ PASS[0m [+0pts] build_policy_agent() runs the retrievers with ThreadPoolExecutor
+
+═══════════════════════════════════════════════════════
+  [1mScore: [92m40/40 pts (100%)[0m
+═══════════════════════════════════════════════════════
+
+  [92m[1m🎉 Perfect score! All tasks complete.[0m
+

@@ -5,7 +5,7 @@
 
 ![NovaMart support demo](project/starter/evidence/standout/novamart-demo.gif)
 
-*Screens from the live deployment (October 2026): Cognito sign-in, then an order status, a policy question and a calculation, each with its X-Ray trace. The lab AWS account has since been reset, so the system is no longer running.*
+*Demo of the live deployment (October 2026): Cognito sign-in, then an order status, a policy question and a calculation, each with its X-Ray trace. The lab AWS account has since been reset, so the system is no longer running.*
 
 **Result:** `python tests/test_agent.py all` → **120/120**, plus the four optional stand-out extensions (adversarial testing, CloudWatch dashboard, persistent session memory, Cognito web front end).
 

@@ -7,6 +7,8 @@
 
 *Demo of the live deployment (October 2026): Cognito sign-in, then an order status, a policy question and a calculation, each with its X-Ray trace. The lab AWS account has since been reset, so the system is no longer running.*
 
+📝 **Write-up:** [From finance to AI engineering: 6 lessons I learned building this system](https://dev.to/mialy333/from-finance-to-ai-engineering-6-lessons-i-learned-building-a-multi-agent-support-system-on-amazon-2fm1)
+
 **Result:** `python tests/test_agent.py all` → **120/120**, plus the four optional stand-out extensions (adversarial testing, CloudWatch dashboard, persistent session memory, Cognito web front end).
 
 ---
